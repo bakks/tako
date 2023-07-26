@@ -27,8 +27,17 @@ type ParsedFunction struct {
 	Params        string
 	ReturnType    string
 	Documentation string
-	StartPoint    *sitter.Point
+	Range         *sitter.Range
 	Node          *sitter.Node
+}
+
+func GetRange(node *sitter.Node) *sitter.Range {
+	return &sitter.Range{
+		StartPoint: node.StartPoint(),
+		EndPoint:   node.EndPoint(),
+		StartByte:  node.StartByte(),
+		EndByte:    node.EndByte(),
+	}
 }
 
 func (f *ParsedFunction) String() string {
@@ -39,8 +48,8 @@ func (f *ParsedFunction) String() string {
 	}
 	str.WriteString(fmt.Sprintf("%s%s %s", f.Name, f.Params, f.ReturnType))
 
-	startPoint := f.StartPoint
-	endPoint := f.Node.EndPoint()
+	startPoint := f.Range.StartPoint
+	endPoint := f.Range.EndPoint
 	str.WriteString(fmt.Sprintf(" %d:%d-%d:%d", startPoint.Row, startPoint.Column, endPoint.Row, endPoint.Column))
 	return str.String()
 }
@@ -54,9 +63,10 @@ func (s *ParsedSymbol) String() string {
 }
 
 // We probably want a more efficient way to do this
-func precedingComments(node *sitter.Node, sourceCode []byte) (string, *sitter.Point) {
+func precedingComments(node *sitter.Node, sourceCode []byte) (string, *sitter.Point, uint32) {
 	var comments []string
 	var startPoint *sitter.Point
+	var startByte uint32
 
 	cursor := sitter.NewTreeCursor(node.Parent())
 	cursor.GoToFirstChild()
@@ -69,13 +79,14 @@ func precedingComments(node *sitter.Node, sourceCode []byte) (string, *sitter.Po
 			break
 		}
 
-		//log.Println(cursor.CurrentNode().Type())
+		log.Println(cursor.CurrentNode().Type())
 		// If the sibling is a comment, we add it to the comments
 		if currNode.Type() == "comment" {
 			comments = append(comments, string(currNode.Content(sourceCode)))
 			if startPoint == nil {
-				point := cursor.CurrentNode().StartPoint()
+				point := currNode.StartPoint()
 				startPoint = &point
+				startByte = currNode.StartByte()
 			}
 		} else {
 			startPoint = nil
@@ -88,7 +99,7 @@ func precedingComments(node *sitter.Node, sourceCode []byte) (string, *sitter.Po
 		}
 	}
 
-	return strings.Join(comments, "\n"), startPoint
+	return strings.Join(comments, "\n"), startPoint, startByte
 }
 
 // Identify function declarations
@@ -119,11 +130,12 @@ func Functions(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) 
 			switch name := query.CaptureNameForId(cap.Index); name {
 			case "function.name":
 				node := cap.Node.Parent()
-				startPoint := node.StartPoint()
+				rng := GetRange(node)
+
 				newFunc := ParsedFunction{
-					Name:       string(cap.Node.Content(sourceCode)),
-					Node:       node,
-					StartPoint: &startPoint,
+					Name:  string(cap.Node.Content(sourceCode)),
+					Node:  node,
+					Range: rng,
 				}
 
 				paramList := node.ChildByFieldName("parameters")
@@ -136,10 +148,11 @@ func Functions(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) 
 				if returnType != nil {
 					newFunc.ReturnType = string(returnType.Content(sourceCode))
 				}
-				doc, commentStart := precedingComments(node, sourceCode)
+				doc, commentStart, commentStartBytes := precedingComments(node, sourceCode)
 				if doc != "" {
 					newFunc.Documentation = doc
-					newFunc.StartPoint = commentStart
+					newFunc.Range.StartPoint = *commentStart
+					newFunc.Range.StartByte = commentStartBytes
 				}
 				funcs = append(funcs, &newFunc)
 			}
