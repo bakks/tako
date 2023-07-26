@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"strings"
 
 	"github.com/alecthomas/kong"
 	sitter "github.com/smacker/go-tree-sitter"
@@ -21,6 +22,132 @@ func testfunc(a int, b bool, c ...string) bool {
 	return true
 }
 
+type ParsedFunction struct {
+	Name          string
+	Params        string
+	ReturnType    string
+	Documentation string
+	Node          *sitter.Node
+}
+
+func (f *ParsedFunction) String() string {
+	var str strings.Builder
+	if f.Documentation != "" {
+		str.WriteString(f.Documentation)
+		str.WriteString("\n")
+	}
+	str.WriteString(fmt.Sprintf("%s%s %s", f.Name, f.Params, f.ReturnType))
+	return str.String()
+}
+
+type ParsedSymbol struct {
+	Function ParsedFunction
+}
+
+func (s *ParsedSymbol) String() string {
+	return fmt.Sprintf("%s", s.Function.String())
+}
+
+// We probably want a more efficient way to do this
+func precedingComments(node *sitter.Node, sourceCode []byte) string {
+	var comments []string
+
+	cursor := sitter.NewTreeCursor(node.Parent())
+	cursor.GoToFirstChild()
+
+	// Go through all siblings
+	for {
+		// If the sibling ends after the start of the current node, we break
+		if cursor.CurrentNode().EndByte() >= node.StartByte() {
+			break
+		}
+
+		//log.Println(cursor.CurrentNode().Type())
+		// If the sibling is a comment, we add it to the comments
+		if cursor.CurrentNode().Type() == "comment" {
+			comments = append(comments, string(cursor.CurrentNode().Content(sourceCode)))
+		} else {
+			comments = []string{}
+		}
+
+		// If there are no more siblings, we break
+		if !cursor.GoToNextSibling() {
+			break
+		}
+	}
+
+	return strings.Join(comments, "\n")
+}
+
+func Functions(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([]*ParsedFunction, error) {
+	// Query for function definitions
+	functionPattern := `(function_declaration
+	(identifier) @function.name)
+`
+
+	// Execute the query
+	query, err := sitter.NewQuery([]byte(functionPattern), lang)
+	if err != nil {
+		return nil, err
+	}
+	queryCursor := sitter.NewQueryCursor()
+	queryCursor.Exec(query, rootNode)
+
+	funcs := []*ParsedFunction{}
+
+	// Iterate over query results
+	for {
+		match, ok := queryCursor.NextMatch()
+		if !ok {
+			break
+		}
+
+		for _, cap := range match.Captures {
+			switch name := query.CaptureNameForId(cap.Index); name {
+			case "function.name":
+				node := cap.Node.Parent()
+				newFunc := ParsedFunction{
+					Name: string(cap.Node.Content(sourceCode)),
+					Node: node,
+				}
+
+				paramList := node.ChildByFieldName("parameters")
+				if paramList != nil {
+					newFunc.Params = string(paramList.Content(sourceCode))
+				} else {
+					newFunc.Params = "()"
+				}
+				returnType := node.ChildByFieldName("result")
+				if returnType != nil {
+					newFunc.ReturnType = string(returnType.Content(sourceCode))
+				}
+				newFunc.Documentation = precedingComments(node, sourceCode)
+				funcs = append(funcs, &newFunc)
+			}
+		}
+	}
+
+	return funcs, nil
+}
+
+func Symbols(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([]*ParsedSymbol, error) {
+	funcs, err := Functions(rootNode, lang, sourceCode)
+	if err != nil {
+		return nil, err
+	}
+
+	symbols := []*ParsedSymbol{}
+
+	for _, f := range funcs {
+		symbol := ParsedSymbol{
+			Function: *f,
+		}
+		symbols = append(symbols, &symbol)
+	}
+
+	return symbols, nil
+}
+
 // tako main function
 // executes from CLI
 func main() {
@@ -34,54 +161,17 @@ func main() {
 		}
 		// Parse source code
 		lang := golang.GetLanguage()
-		n, _ := sitter.ParseCtx(context.Background(), sourceCode, lang)
+		rootNode, _ := sitter.ParseCtx(context.Background(), sourceCode, lang)
 
-		// Query for function definitions
-		//functionPattern := `(function_declaration (identifier) @function)`
-		functionPattern := `(
-(function_declaration
-  (
-    (identifier) @function.name
-    (parameter_list) @param
-    (type_identifier)? @return.type)
-	)
-)`
-
-		// Execute the query
-		q, err := sitter.NewQuery([]byte(functionPattern), lang)
+		symbols, err := Symbols(rootNode, lang, sourceCode)
 		if err != nil {
-			panic(err)
+			log.Fatal(err)
 		}
-		qc := sitter.NewQueryCursor()
-		qc.Exec(q, n)
 
-		// Iterate over query results
-		for {
-			m, ok := qc.NextMatch()
-			if !ok {
-				break
-			}
-
-			for _, c := range m.Captures {
-				switch name := q.CaptureNameForId(c.Index); name {
-				case "comment":
-					fmt.Println("Comment:", string(c.Node.Content(sourceCode)))
-				case "function.name":
-					fmt.Println("Function:", string(c.Node.Content(sourceCode)))
-				case "parameter.name":
-					fmt.Println("Parameter:", string(c.Node.Content(sourceCode)))
-				case "parameter.type":
-					fmt.Println("Type:", string(c.Node.Content(sourceCode)))
-				case "param":
-					fmt.Println("Param:", string(c.Node.Content(sourceCode)))
-				case "return.type":
-					fmt.Println("Return Type:", string(c.Node.Content(sourceCode)))
-				case "func":
-					fmt.Println("Func:", string(c.Node.Content(sourceCode)))
-				}
-			}
-
+		for _, s := range symbols {
+			fmt.Println(s)
 		}
+
 	default:
 		panic(ctx.Command())
 	}
