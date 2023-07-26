@@ -31,6 +31,43 @@ type ParsedFunction struct {
 	Node          *sitter.Node
 }
 
+func (this *ParsedFunction) String() string {
+	var str strings.Builder
+	if this.Documentation != "" {
+		str.WriteString(this.Documentation)
+		str.WriteString("\n")
+	}
+	str.WriteString(fmt.Sprintf("%s%s %s", this.Name, this.Params, this.ReturnType))
+	str.WriteString(" ")
+	str.WriteString(RangeString(this.Range))
+	return str.String()
+}
+
+type ParsedTypeDefinition struct {
+	Definition    string
+	Documentation string
+	Range         *sitter.Range
+	Node          *sitter.Node
+}
+
+func (this *ParsedTypeDefinition) String() string {
+	var str strings.Builder
+	if this.Documentation != "" {
+		str.WriteString(this.Documentation)
+		str.WriteString("\n")
+	}
+	str.WriteString(this.Definition)
+	str.WriteString(" ")
+	str.WriteString(RangeString(this.Range))
+	return str.String()
+}
+
+func RangeString(rng *sitter.Range) string {
+	startPoint := rng.StartPoint
+	endPoint := rng.EndPoint
+	return fmt.Sprintf("%d:%d-%d:%d", startPoint.Row, startPoint.Column, endPoint.Row, endPoint.Column)
+}
+
 func GetRange(node *sitter.Node) *sitter.Range {
 	return &sitter.Range{
 		StartPoint: node.StartPoint(),
@@ -40,26 +77,18 @@ func GetRange(node *sitter.Node) *sitter.Range {
 	}
 }
 
-func (f *ParsedFunction) String() string {
-	var str strings.Builder
-	if f.Documentation != "" {
-		str.WriteString(f.Documentation)
-		str.WriteString("\n")
-	}
-	str.WriteString(fmt.Sprintf("%s%s %s", f.Name, f.Params, f.ReturnType))
-
-	startPoint := f.Range.StartPoint
-	endPoint := f.Range.EndPoint
-	str.WriteString(fmt.Sprintf(" %d:%d-%d:%d", startPoint.Row, startPoint.Column, endPoint.Row, endPoint.Column))
-	return str.String()
-}
-
 type ParsedSymbol struct {
-	Function ParsedFunction
+	Function       *ParsedFunction
+	TypeDefinition *ParsedTypeDefinition
 }
 
-func (s *ParsedSymbol) String() string {
-	return fmt.Sprintf("%s", s.Function.String())
+func (this *ParsedSymbol) String() string {
+	if this.TypeDefinition != nil {
+		return this.TypeDefinition.String()
+	} else if this.Function != nil {
+		return this.Function.String()
+	}
+	return ""
 }
 
 // We probably want a more efficient way to do this
@@ -79,7 +108,6 @@ func precedingComments(node *sitter.Node, sourceCode []byte) (string, *sitter.Po
 			break
 		}
 
-		log.Println(cursor.CurrentNode().Type())
 		// If the sibling is a comment, we add it to the comments
 		if currNode.Type() == "comment" {
 			comments = append(comments, string(currNode.Content(sourceCode)))
@@ -103,14 +131,12 @@ func precedingComments(node *sitter.Node, sourceCode []byte) (string, *sitter.Po
 }
 
 // Identify function declarations
-func Functions(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([]*ParsedFunction, error) {
+func QueryFunctions(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([]*ParsedFunction, error) {
 	// Query for function definitions
-	functionPattern := `(function_declaration
-	(identifier) @function.name)
-`
+	pattern := "(function_declaration	(identifier) @function.name)"
 
 	// Execute the query
-	query, err := sitter.NewQuery([]byte(functionPattern), lang)
+	query, err := sitter.NewQuery([]byte(pattern), lang)
 	if err != nil {
 		return nil, err
 	}
@@ -162,8 +188,55 @@ func Functions(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) 
 	return funcs, nil
 }
 
-func Symbols(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([]*ParsedSymbol, error) {
-	funcs, err := Functions(rootNode, lang, sourceCode)
+func QueryTypeDefinitions(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([]*ParsedTypeDefinition, error) {
+	// Query for type definitions
+	pattern := "(type_spec (type_identifier)) @type.name"
+
+	// Execute the query
+	query, err := sitter.NewQuery([]byte(pattern), lang)
+	if err != nil {
+		return nil, err
+	}
+	queryCursor := sitter.NewQueryCursor()
+	queryCursor.Exec(query, rootNode)
+
+	types := []*ParsedTypeDefinition{}
+
+	// Iterate over query results
+	for {
+		match, ok := queryCursor.NextMatch()
+		if !ok {
+			break
+		}
+
+		for _, cap := range match.Captures {
+			switch name := query.CaptureNameForId(cap.Index); name {
+			case "type.name":
+				node := cap.Node.Parent()
+				rng := GetRange(node)
+
+				newType := ParsedTypeDefinition{
+					Definition: string(cap.Node.Content(sourceCode)),
+					Node:       node,
+					Range:      rng,
+				}
+
+				doc, commentStart, commentStartBytes := precedingComments(node, sourceCode)
+				if doc != "" {
+					newType.Documentation = doc
+					newType.Range.StartPoint = *commentStart
+					newType.Range.StartByte = commentStartBytes
+				}
+				types = append(types, &newType)
+			}
+		}
+	}
+
+	return types, nil
+}
+
+func QuerySymbols(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([]*ParsedSymbol, error) {
+	funcs, err := QueryFunctions(rootNode, lang, sourceCode)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +245,19 @@ func Symbols(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([
 
 	for _, f := range funcs {
 		symbol := ParsedSymbol{
-			Function: *f,
+			Function: f,
+		}
+		symbols = append(symbols, &symbol)
+	}
+
+	types, err := QueryTypeDefinitions(rootNode, lang, sourceCode)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, t := range types {
+		symbol := ParsedSymbol{
+			TypeDefinition: t,
 		}
 		symbols = append(symbols, &symbol)
 	}
@@ -195,13 +280,13 @@ func main() {
 		lang := golang.GetLanguage()
 		rootNode, _ := sitter.ParseCtx(context.Background(), sourceCode, lang)
 
-		symbols, err := Symbols(rootNode, lang, sourceCode)
+		symbols, err := QuerySymbols(rootNode, lang, sourceCode)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		for _, s := range symbols {
-			fmt.Println(s)
+		for _, symbol := range symbols {
+			fmt.Printf("%s\n\n", symbol.String())
 		}
 
 	default:
