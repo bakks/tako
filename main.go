@@ -22,69 +22,10 @@ func testfunc(a int, b bool, c ...string) bool {
 	return true
 }
 
-type ParsedFunction struct {
-	Name          string
-	Params        string
-	ReturnType    string
-	Documentation string
-	Range         *sitter.Range
-	Node          *sitter.Node
-}
-
-func (this *ParsedFunction) String() string {
-	var str strings.Builder
-	if this.Documentation != "" {
-		str.WriteString(this.Documentation)
-		str.WriteString("\n")
-	}
-	str.WriteString(fmt.Sprintf("%s%s %s", this.Name, this.Params, this.ReturnType))
-	str.WriteString(" ")
-	str.WriteString(RangeString(this.Range))
-	return str.String()
-}
-
-type ParsedMethod struct {
-	Name          string
-	Params        string
-	ReturnType    string
-	Documentation string
-	Range         *sitter.Range
-	Node          *sitter.Node
-}
-
-func (this *ParsedMethod) Testxxx(a int, b bool, c ...string) (bool, error) {
-	return true, nil
-}
-
-func (this *ParsedMethod) String() string {
-	var str strings.Builder
-	if this.Documentation != "" {
-		str.WriteString(this.Documentation)
-		str.WriteString("\n")
-	}
-	str.WriteString(fmt.Sprintf("%s%s %s", this.Name, this.Params, this.ReturnType))
-	str.WriteString(" ")
-	str.WriteString(RangeString(this.Range))
-	return str.String()
-}
-
-type ParsedTypeDefinition struct {
-	Definition    string
-	Documentation string
-	Range         *sitter.Range
-	Node          *sitter.Node
-}
-
-func (this *ParsedTypeDefinition) String() string {
-	var str strings.Builder
-	if this.Documentation != "" {
-		str.WriteString(this.Documentation)
-		str.WriteString("\n")
-	}
-	str.WriteString(this.Definition)
-	str.WriteString(" ")
-	str.WriteString(RangeString(this.Range))
-	return str.String()
+type ParsedDocument struct {
+	Root       *sitter.Node
+	SourceCode []byte
+	Language   *sitter.Language
 }
 
 func RangeString(rng *sitter.Range) string {
@@ -102,21 +43,14 @@ func GetRange(node *sitter.Node) *sitter.Range {
 	}
 }
 
-type ParsedSymbol struct {
-	Function       *ParsedFunction
-	TypeDefinition *ParsedTypeDefinition
-	Method         *ParsedMethod
+type Symbol struct {
+	Summary string
+	Range   *sitter.Range
+	Node    *sitter.Node
 }
 
-func (this *ParsedSymbol) String() string {
-	if this.TypeDefinition != nil {
-		return this.TypeDefinition.String()
-	} else if this.Function != nil {
-		return this.Function.String()
-	} else if this.Method != nil {
-		return this.Method.String()
-	}
-	return ""
+func (this *Symbol) String() string {
+	return fmt.Sprintf("%s %s", this.Summary, RangeString(this.Range))
 }
 
 // We probably want a more efficient way to do this
@@ -166,20 +100,14 @@ func precedingComments(node *sitter.Node, sourceCode []byte) (string, *sitter.Po
 	return strings.Join(comments, "\n"), startPoint, startByte
 }
 
-// Identify function declarations
-func QueryFunctions(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([]*ParsedFunction, error) {
-	// Query for function definitions
-	pattern := "(function_declaration	(identifier) @function.name)"
-
+func (this *ParsedDocument) QueryCaptures(queryPattern string, callback func(*sitter.QueryCapture) error) error {
 	// Execute the query
-	query, err := sitter.NewQuery([]byte(pattern), lang)
+	query, err := sitter.NewQuery([]byte(queryPattern), this.Language)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	queryCursor := sitter.NewQueryCursor()
-	queryCursor.Exec(query, rootNode)
-
-	funcs := []*ParsedFunction{}
+	queryCursor.Exec(query, this.Root)
 
 	// Iterate over query results
 	for {
@@ -189,281 +117,133 @@ func QueryFunctions(rootNode *sitter.Node, lang *sitter.Language, sourceCode []b
 		}
 
 		for _, cap := range match.Captures {
-			switch name := query.CaptureNameForId(cap.Index); name {
-			case "function.name":
-				node := cap.Node.Parent()
-				rng := GetRange(node)
-
-				newFunc := ParsedFunction{
-					Name:  string(cap.Node.Content(sourceCode)),
-					Node:  node,
-					Range: rng,
-				}
-
-				paramList := node.ChildByFieldName("parameters")
-				if paramList != nil {
-					newFunc.Params = string(paramList.Content(sourceCode))
-				} else {
-					newFunc.Params = "()"
-				}
-				returnType := node.ChildByFieldName("result")
-				if returnType != nil {
-					newFunc.ReturnType = string(returnType.Content(sourceCode))
-				}
-				doc, commentStart, commentStartBytes := precedingComments(node, sourceCode)
-				if doc != "" {
-					newFunc.Documentation = doc
-					newFunc.Range.StartPoint = *commentStart
-					newFunc.Range.StartByte = commentStartBytes
-				}
-				funcs = append(funcs, &newFunc)
+			err = callback(&cap)
+			if err != nil {
+				return err
 			}
 		}
 	}
 
-	return funcs, nil
+	return nil
 }
 
-func QueryMethods2(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([]*ParsedMethod, error) {
-	// Query for method definitions
-	pattern := `(method_declaration
-		(parameter_list) @receiver
-		(field_identifier) @method.name
-		(parameter_list) @method.parameters
-		(type_identifier) @method.type)`
-
-	// Execute the query
-	query, err := sitter.NewQuery([]byte(pattern), lang)
-	if err != nil {
-		return nil, err
-	}
-	queryCursor := sitter.NewQueryCursor()
-	queryCursor.Exec(query, rootNode)
-
-	methods := []*ParsedMethod{}
-
-	// Iterate over query results
-	for {
-		match, ok := queryCursor.NextMatch()
-		if !ok {
-			break
-		}
-		fmt.Printf("match: %v\n", match)
-
-		for _, cap := range match.Captures {
-			fmt.Printf("cap: %s\n", string(cap.Node.Content(sourceCode)))
-		}
-	}
-
-	return methods, nil
-}
-
-func QueryMethods3(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([]*ParsedMethod, error) {
-	// Query for method definitions
-	pattern := `(method_declaration) @method`
-
-	// Execute the query
-	query, err := sitter.NewQuery([]byte(pattern), lang)
-	if err != nil {
-		return nil, err
-	}
-	queryCursor := sitter.NewQueryCursor()
-	queryCursor.Exec(query, rootNode)
-
-	methods := []*ParsedMethod{}
-
-	// Iterate over query results
-	for {
-		match, ok := queryCursor.NextMatch()
-		if !ok {
-			break
-		}
-		fmt.Printf("match: %v\n", match)
-
-		for _, cap := range match.Captures {
-			// iterate over capture children
-			cursor := sitter.NewTreeCursor(cap.Node)
-			cursor.GoToFirstChild()
-
-			code := ""
-
-			for {
-				currNode := cursor.CurrentNode()
-				//fmt.Printf("child: %s %s\n", currNode.Type(), cursor.CurrentFieldName())
-				if cursor.CurrentFieldName() != "body" {
-					fmt.Printf("child: %s %s %s\n", currNode.Type(), cursor.CurrentFieldName(), string(currNode.Content(sourceCode)))
-					code += string(currNode.Content(sourceCode))
-				}
-
-				ok = cursor.GoToNextSibling()
-				if !ok {
-					break
-				}
-			}
-
-			fmt.Printf("code: %s\n", code)
-		}
-	}
-
-	return methods, nil
-}
-
-// Identify method declarations
-func QueryMethods(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([]*ParsedMethod, error) {
-	// Query for method definitions
-	pattern := "(method_declaration) @method.name"
-	// (method_declaration
-	//   name: (identifier) @method.name
-	//   type: (function_type
-	//     parameters: (field_list
-	//       (field_declaration
-	//         name: (identifier) @parameter.name
-	//         type: (_) @parameter.type))))
-
-	// Execute the query
-	query, err := sitter.NewQuery([]byte(pattern), lang)
-	if err != nil {
-		return nil, err
-	}
-	queryCursor := sitter.NewQueryCursor()
-	queryCursor.Exec(query, rootNode)
-
-	methods := []*ParsedMethod{}
-
-	// Iterate over query results
-	for {
-		match, ok := queryCursor.NextMatch()
-		if !ok {
-			break
-		}
-
-		for _, cap := range match.Captures {
-			fmt.Printf("cap: %v\n", cap)
-			switch name := query.CaptureNameForId(cap.Index); name {
-			case "method.name":
-				node := cap.Node.Parent()
-				rng := GetRange(node)
-
-				newMethod := ParsedMethod{
-					Name:  string(cap.Node.Content(sourceCode)),
-					Node:  node,
-					Range: rng,
-				}
-				log.Printf("newMethod: %v\n", newMethod)
-
-				paramList := node.ChildByFieldName("parameters")
-				log.Printf("paramList: %v\n", paramList)
-				if paramList != nil {
-					newMethod.Params = string(paramList.Content(sourceCode))
-				} else {
-					newMethod.Params = "()"
-				}
-				returnType := node.ChildByFieldName("result")
-				log.Printf("returnType: %v\n", returnType)
-				if returnType != nil {
-					newMethod.ReturnType = string(returnType.Content(sourceCode))
-				}
-				doc, commentStart, commentStartBytes := precedingComments(node, sourceCode)
-				if doc != "" {
-					newMethod.Documentation = doc
-					newMethod.Range.StartPoint = *commentStart
-					newMethod.Range.StartByte = commentStartBytes
-				}
-				methods = append(methods, &newMethod)
-			}
-		}
-	}
-
-	return methods, nil
-}
-
-func QueryTypeDefinitions(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([]*ParsedTypeDefinition, error) {
-	// Query for type definitions
-	pattern := "(type_spec (type_identifier)) @type.name"
-
-	// Execute the query
-	query, err := sitter.NewQuery([]byte(pattern), lang)
-	if err != nil {
-		return nil, err
-	}
-	queryCursor := sitter.NewQueryCursor()
-	queryCursor.Exec(query, rootNode)
-
-	types := []*ParsedTypeDefinition{}
-
-	// Iterate over query results
-	for {
-		match, ok := queryCursor.NextMatch()
-		if !ok {
-			break
-		}
-
-		for _, cap := range match.Captures {
-			switch name := query.CaptureNameForId(cap.Index); name {
-			case "type.name":
-				node := cap.Node.Parent()
-				rng := GetRange(node)
-
-				newType := ParsedTypeDefinition{
-					Definition: string(cap.Node.Content(sourceCode)),
-					Node:       node,
-					Range:      rng,
-				}
-
-				doc, commentStart, commentStartBytes := precedingComments(node, sourceCode)
-				if doc != "" {
-					newType.Documentation = doc
-					newType.Range.StartPoint = *commentStart
-					newType.Range.StartByte = commentStartBytes
-				}
-				types = append(types, &newType)
-			}
-		}
-	}
-
-	return types, nil
-}
-
-func QuerySymbols(rootNode *sitter.Node, lang *sitter.Language, sourceCode []byte) ([]*ParsedSymbol, error) {
-	funcs, err := QueryFunctions(rootNode, lang, sourceCode)
+func (this *ParsedDocument) QuerySymbols() ([]*Symbol, error) {
+	symbols, err := this.QueryMethods()
 	if err != nil {
 		return nil, err
 	}
 
-	symbols := []*ParsedSymbol{}
-
-	for _, f := range funcs {
-		symbol := ParsedSymbol{
-			Function: f,
-		}
-		symbols = append(symbols, &symbol)
-	}
-
-	types, err := QueryTypeDefinitions(rootNode, lang, sourceCode)
+	funcs, err := this.QueryFunctions()
 	if err != nil {
 		return nil, err
 	}
+	symbols = append(symbols, funcs...)
 
-	for _, t := range types {
-		symbol := ParsedSymbol{
-			TypeDefinition: t,
-		}
-		symbols = append(symbols, &symbol)
-	}
-
-	methods, err := QueryMethods3(rootNode, lang, sourceCode)
+	typeDefs, err := this.QueryTypeDefinitions()
 	if err != nil {
 		return nil, err
 	}
-
-	for _, method := range methods {
-		symbol := ParsedSymbol{
-			Method: method,
-		}
-		symbols = append(symbols, &symbol)
-	}
+	symbols = append(symbols, typeDefs...)
 
 	return symbols, nil
+}
+
+// Given a treesitter node, find any preceding comments and stringify all
+// of its children except for 'body', returning it as a Symbol.
+func (this *ParsedDocument) EverythingExceptBody(node *sitter.Node) *Symbol {
+	cursor := sitter.NewTreeCursor(node)
+	cursor.GoToFirstChild()
+
+	var code strings.Builder
+	rng := GetRange(node)
+
+	doc, commentStart, commentStartBytes := precedingComments(node, this.SourceCode)
+	if doc != "" {
+		code.WriteString(doc)
+		code.WriteString("\n")
+		rng.StartPoint = *commentStart
+		rng.StartByte = commentStartBytes
+	}
+
+	startedWriting := false
+	for {
+		currNode := cursor.CurrentNode()
+
+		if cursor.CurrentFieldName() != "body" {
+			if startedWriting && cursor.CurrentFieldName() != "parameters" {
+				code.WriteString(" ")
+			}
+
+			code.WriteString(string(currNode.Content(this.SourceCode)))
+			startedWriting = true
+		}
+
+		if !cursor.GoToNextSibling() {
+			break
+		}
+	}
+
+	symbol := Symbol{
+		Summary: code.String(),
+		Range:   rng,
+		Node:    node,
+	}
+	return &symbol
+}
+
+func (this *ParsedDocument) QueryFunctions() ([]*Symbol, error) {
+	// Query for method definitions
+	pattern := "(function_declaration) @dec"
+	symbols := []*Symbol{}
+
+	this.QueryCaptures(pattern, func(cap *sitter.QueryCapture) error {
+		symbol := this.EverythingExceptBody(cap.Node)
+		symbols = append(symbols, symbol)
+		return nil
+	})
+
+	return symbols, nil
+}
+
+func (this *ParsedDocument) QueryMethods() ([]*Symbol, error) {
+	// Query for method definitions
+	pattern := "(method_declaration) @method"
+	symbols := []*Symbol{}
+
+	this.QueryCaptures(pattern, func(cap *sitter.QueryCapture) error {
+		symbol := this.EverythingExceptBody(cap.Node)
+		symbols = append(symbols, symbol)
+		return nil
+	})
+
+	return symbols, nil
+}
+
+func (this *ParsedDocument) QueryTypeDefinitions() ([]*Symbol, error) {
+	// Query for method definitions
+	pattern := "(type_spec) @type.name"
+	symbols := []*Symbol{}
+
+	this.QueryCaptures(pattern, func(cap *sitter.QueryCapture) error {
+		symbol := this.EverythingExceptBody(cap.Node)
+		symbols = append(symbols, symbol)
+		return nil
+	})
+
+	return symbols, nil
+}
+
+func NewParsedDocument(sourceCode []byte, language *sitter.Language) (*ParsedDocument, error) {
+	rootNode, err := sitter.ParseCtx(context.Background(), sourceCode, language)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ParsedDocument{
+		Root:       rootNode,
+		SourceCode: sourceCode,
+		Language:   language,
+	}, nil
 }
 
 // tako main function
@@ -479,15 +259,19 @@ func main() {
 		}
 		// Parse source code
 		lang := golang.GetLanguage()
-		rootNode, _ := sitter.ParseCtx(context.Background(), sourceCode, lang)
 
-		symbols, err := QuerySymbols(rootNode, lang, sourceCode)
+		doc, err := NewParsedDocument(sourceCode, lang)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		for _, symbol := range symbols {
-			fmt.Printf("%s\n\n", symbol.String())
+		sym, err := doc.QuerySymbols()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		for _, s := range sym {
+			fmt.Printf("%s\n\n", s.String())
 		}
 
 	default:
