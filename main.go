@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"sort"
 	"strings"
 
 	"github.com/alecthomas/kong"
@@ -48,6 +49,13 @@ type Symbol struct {
 	Range   *sitter.Range
 	Node    *sitter.Node
 }
+
+// Sort interface for sorting Symbols by Symbol.Range.StartByte
+type SymbolByStartByte []*Symbol
+
+func (a SymbolByStartByte) Len() int           { return len(a) }
+func (a SymbolByStartByte) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a SymbolByStartByte) Less(i, j int) bool { return a[i].Range.StartByte < a[j].Range.StartByte }
 
 func (this *Symbol) String() string {
 	return fmt.Sprintf("%s %s", this.Summary, RangeString(this.Range))
@@ -117,6 +125,9 @@ func (this *ParsedDocument) QueryCaptures(queryPattern string, callback func(*si
 		}
 
 		for _, cap := range match.Captures {
+			if !cap.Node.Parent().Equal(this.Root) {
+				continue
+			}
 			err = callback(&cap)
 			if err != nil {
 				return err
@@ -144,6 +155,16 @@ func (this *ParsedDocument) QuerySymbols() ([]*Symbol, error) {
 		return nil, err
 	}
 	symbols = append(symbols, typeDefs...)
+
+	varDecl, err := this.QueryVarDeclarations()
+	if err != nil {
+		return nil, err
+	}
+	symbols = append(symbols, varDecl...)
+
+	sort.Slice(symbols, func(i, j int) bool {
+		return symbols[i].Range.StartByte < symbols[j].Range.StartByte
+	})
 
 	return symbols, nil
 }
@@ -233,6 +254,20 @@ func (this *ParsedDocument) QueryTypeDefinitions() ([]*Symbol, error) {
 	return symbols, nil
 }
 
+func (this *ParsedDocument) QueryVarDeclarations() ([]*Symbol, error) {
+	// Query for method definitions
+	pattern := "(var_declaration) @dec"
+	symbols := []*Symbol{}
+
+	this.QueryCaptures(pattern, func(cap *sitter.QueryCapture) error {
+		symbol := this.EverythingExceptBody(cap.Node)
+		symbols = append(symbols, symbol)
+		return nil
+	})
+
+	return symbols, nil
+}
+
 func NewParsedDocument(sourceCode []byte, language *sitter.Language) (*ParsedDocument, error) {
 	rootNode, err := sitter.ParseCtx(context.Background(), sourceCode, language)
 	if err != nil {
@@ -273,6 +308,16 @@ func main() {
 		for _, s := range sym {
 			fmt.Printf("%s\n\n", s.String())
 		}
+
+		//		cursor := sitter.NewTreeCursor(doc.Root)
+		//		cursor.GoToFirstChild()
+		//		for {
+		//			currNode := cursor.CurrentNode()
+		//			fmt.Printf("%s\n", currNode.Type())
+		//			if !cursor.GoToNextSibling() {
+		//				break
+		//			}
+		//		}
 
 	default:
 		panic(ctx.Command())
