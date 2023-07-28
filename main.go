@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/alecthomas/kong"
 	sitter "github.com/smacker/go-tree-sitter"
@@ -29,8 +29,13 @@ import (
 
 var CLI struct {
 	Symbols struct {
-		Path string `arg:"" name:"file" help:"Path to search for symbols" type:"path"`
+		Path string `arg:"" name:"path" help:"Path to search for symbols" type:"path"`
 	} `cmd:"" help:"Get symbols from a directory or file"`
+
+	Tree struct {
+		Path     string `arg:"" name:"file" help:"Path to search for symbols" type:"path"`
+		MaxDepth int    `short:"d" default:"10" help:"Maximum depth to print"`
+	} `cmd:"" help:"Print the syntax tree for a file"`
 }
 
 // comment 1
@@ -427,28 +432,119 @@ func PrintSymbols(path string) error {
 	return err
 }
 
+func isOnlyWhitespace(s string) bool {
+	for _, c := range s {
+		if !unicode.IsSpace(c) {
+			return false
+		}
+	}
+	return true
+}
+
+func PrintParseTree(cursor *sitter.TreeCursor, depth int, depthRemaining int, childLines []int) {
+	if depthRemaining == 0 {
+		return
+	}
+
+	var padding string
+	if depth >= 1 {
+		for _, line := range childLines {
+			switch line {
+			case 0:
+				padding += "  "
+			case 1:
+				padding += "│ "
+			case 2:
+				padding += "├ "
+			case 3:
+				padding += "╰ "
+			}
+		}
+	}
+
+	node := cursor.CurrentNode()
+	var nodeString string
+	if node.IsNamed() {
+		nodeString = fmt.Sprintf("%s %s", node.Type(), cursor.CurrentFieldName())
+	} else if !isOnlyWhitespace(node.Type()) {
+		nodeString = fmt.Sprintf("\"%s\"", node.Type())
+	}
+
+	if nodeString != "" {
+		fmt.Printf("%s%s\n", padding, nodeString)
+	}
+
+	childCount := int(node.ChildCount())
+	if cursor.GoToFirstChild() {
+		children := 0
+		newChildLines := append(childLines, 1)
+
+		if len(newChildLines) > 1 {
+			lastLine := len(newChildLines) - 2
+			if newChildLines[lastLine] == 3 {
+				newChildLines[lastLine] = 0
+			} else if newChildLines[lastLine] == 2 {
+				newChildLines[lastLine] = 1
+			}
+		}
+
+		for cursor.GoToNextSibling() {
+			if children == childCount-2 {
+				newChildLines[len(newChildLines)-1] = 3
+			} else {
+				newChildLines[len(newChildLines)-1] = 2
+			}
+
+			PrintParseTree(cursor, depth+1, depthRemaining-1, newChildLines)
+			children++
+		}
+		cursor.GoToParent()
+	}
+}
+
+func PrintTree(path string, maxDepth int) error {
+	// Read the file
+	sourceCode, err := ioutil.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	// get extension
+	ext := filepath.Ext(path)
+	// Parse source code
+	lang := GetLanguageFromExtension(ext)
+	if lang == nil {
+		return fmt.Errorf("Unsupported file extension: %s", ext)
+	}
+
+	doc, err := NewParsedDocument(sourceCode, lang)
+	if err != nil {
+		return err
+	}
+
+	cursor := sitter.NewTreeCursor(doc.Root)
+	PrintParseTree(cursor, 0, maxDepth, []int{})
+	return nil
+}
+
 // tako main function
 // executes from CLI
 func main() {
 	ctx := kong.Parse(&CLI)
-	switch ctx.Command() {
-	case "symbols <file>":
-		err := PrintSymbols(CLI.Symbols.Path)
-		if err != nil {
-			log.Fatal(err)
-		}
+	var err error
 
-		//		cursor := sitter.NewTreeCursor(doc.Root)
-		//		cursor.GoToFirstChild()
-		//		for {
-		//			currNode := cursor.CurrentNode()
-		//			fmt.Printf("%s\n", currNode.Type())
-		//			if !cursor.GoToNextSibling() {
-		//				break
-		//			}
-		//		}
+	switch ctx.Command() {
+	case "symbols <path>":
+		err = PrintSymbols(CLI.Symbols.Path)
+
+	case "tree <file>":
+		err = PrintTree(CLI.Tree.Path, CLI.Tree.MaxDepth)
 
 	default:
 		panic(ctx.Command())
+	}
+
+	if err != nil {
+		fmt.Printf("Error: %s\n", err)
+		os.Exit(1)
 	}
 }

@@ -18,6 +18,7 @@ watch: Makefile
 
 test: bin/tako
 	./bin/tako symbols .
+	./bin/tako tree main.go -d 3
 
 build: bin/tako
 
