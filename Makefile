@@ -17,7 +17,7 @@ watch: Makefile
 	find . -name "*.go" -o -name "Makefile" | entr -c make
 
 test: bin/tako
-	./bin/tako ./main.go
+	./bin/tako symbols .
 
 build: bin/tako
 

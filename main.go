@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -27,7 +28,9 @@ import (
 )
 
 var CLI struct {
-	File string `arg:"" name:"file" help:"Go file to parse." type:"path"`
+	Symbols struct {
+		Path string `arg:"" name:"file" help:"Path to search for symbols" type:"path"`
+	} `cmd:"" help:"Get symbols from a directory or file"`
 }
 
 // comment 1
@@ -294,6 +297,23 @@ func NewParsedDocument(sourceCode []byte, language *sitter.Language) (*ParsedDoc
 	}, nil
 }
 
+var codeSuffixes = []string{
+	"go", "rs", "js", "ts", "c", "h", "cpp", "cxx", "cc", "hpp", "hxx",
+	"hh", "java", "php", "py", "rb", "cs", "scala", "proto"}
+
+var ignores = []string{
+	"vendor", "node_modules", "third_party", "build", "dist", "out", "target",
+	"bin", ".git"}
+
+func sliceContains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
 func GetLanguageFromExtension(ext string) *sitter.Language {
 	if ext[0] == '.' {
 		ext = ext[1:]
@@ -331,34 +351,91 @@ func GetLanguageFromExtension(ext string) *sitter.Language {
 	}
 }
 
+func PrintFileSymbols(path string) error {
+	// Read the file
+	sourceCode, err := ioutil.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	// get extension
+	ext := filepath.Ext(path)
+	// Parse source code
+	lang := GetLanguageFromExtension(ext)
+	if lang == nil {
+		return fmt.Errorf("Unsupported file extension: %s", ext)
+	}
+
+	doc, err := NewParsedDocument(sourceCode, lang)
+	if err != nil {
+		return err
+	}
+
+	sym, err := doc.QuerySymbols()
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("%s:\n", path)
+
+	for _, s := range sym {
+		fmt.Printf("%s\n\n", s.String())
+	}
+
+	return nil
+}
+
+// Given a path, recurse through all files, check if they are code files,
+// and if so, parse them and print out all symbols with PrintFileSymbols
+func PrintSymbols(path string) error {
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+
+	if !fileInfo.IsDir() {
+		return PrintFileSymbols(path)
+	}
+
+	err = filepath.Walk(path, func(subPath string, info os.FileInfo, err error) error {
+		if err != nil || subPath == path {
+			return err
+		}
+
+		// Check if the file has a code extension
+		fileSuffix := filepath.Ext(subPath)
+		if len(fileSuffix) > 0 && fileSuffix[0] == '.' {
+			fileSuffix = fileSuffix[1:]
+		}
+
+		// last segment of path
+		_, last := filepath.Split(subPath)
+		if sliceContains(ignores, last) {
+			return filepath.SkipDir
+		}
+
+		if !info.IsDir() && sliceContains(codeSuffixes, fileSuffix) {
+			return PrintFileSymbols(subPath)
+		}
+
+		if info.IsDir() {
+			PrintSymbols(subPath)
+		}
+
+		return nil
+	})
+
+	return err
+}
+
 // tako main function
 // executes from CLI
 func main() {
 	ctx := kong.Parse(&CLI)
 	switch ctx.Command() {
-	case "<file>":
-		// Read the file
-		sourceCode, err := ioutil.ReadFile(CLI.File)
+	case "symbols <file>":
+		err := PrintSymbols(CLI.Symbols.Path)
 		if err != nil {
 			log.Fatal(err)
-		}
-		// get extension
-		ext := filepath.Ext(CLI.File)
-		// Parse source code
-		lang := GetLanguageFromExtension(ext)
-
-		doc, err := NewParsedDocument(sourceCode, lang)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		sym, err := doc.QuerySymbols()
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		for _, s := range sym {
-			fmt.Printf("%s\n\n", s.String())
 		}
 
 		//		cursor := sitter.NewTreeCursor(doc.Root)
