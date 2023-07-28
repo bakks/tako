@@ -5,12 +5,25 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/alecthomas/kong"
 	sitter "github.com/smacker/go-tree-sitter"
+	"github.com/smacker/go-tree-sitter/c"
+	"github.com/smacker/go-tree-sitter/cpp"
+	"github.com/smacker/go-tree-sitter/csharp"
 	"github.com/smacker/go-tree-sitter/golang"
+	"github.com/smacker/go-tree-sitter/java"
+	"github.com/smacker/go-tree-sitter/javascript"
+	"github.com/smacker/go-tree-sitter/php"
+	"github.com/smacker/go-tree-sitter/protobuf"
+	"github.com/smacker/go-tree-sitter/python"
+	"github.com/smacker/go-tree-sitter/ruby"
+	"github.com/smacker/go-tree-sitter/rust"
+	"github.com/smacker/go-tree-sitter/scala"
+	"github.com/smacker/go-tree-sitter/typescript/typescript"
 )
 
 var CLI struct {
@@ -281,6 +294,43 @@ func NewParsedDocument(sourceCode []byte, language *sitter.Language) (*ParsedDoc
 	}, nil
 }
 
+func GetLanguageFromExtension(ext string) *sitter.Language {
+	if ext[0] == '.' {
+		ext = ext[1:]
+	}
+
+	switch ext {
+	case "go":
+		return golang.GetLanguage()
+	case "rs":
+		return rust.GetLanguage()
+	case "js":
+		return javascript.GetLanguage()
+	case "ts":
+		return typescript.GetLanguage()
+	case "c", "h":
+		return c.GetLanguage()
+	case "cpp", "cxx", "cc", "hpp", "hxx", "hh":
+		return cpp.GetLanguage()
+	case "java":
+		return java.GetLanguage()
+	case "php":
+		return php.GetLanguage()
+	case "py":
+		return python.GetLanguage()
+	case "rb":
+		return ruby.GetLanguage()
+	case "cs":
+		return csharp.GetLanguage()
+	case "scala":
+		return scala.GetLanguage()
+	case "proto":
+		return protobuf.GetLanguage()
+	default:
+		return nil
+	}
+}
+
 // tako main function
 // executes from CLI
 func main() {
@@ -292,8 +342,10 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		// get extension
+		ext := filepath.Ext(CLI.File)
 		// Parse source code
-		lang := golang.GetLanguage()
+		lang := GetLanguageFromExtension(ext)
 
 		doc, err := NewParsedDocument(sourceCode, lang)
 		if err != nil {
