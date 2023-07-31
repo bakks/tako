@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -25,12 +26,18 @@ import (
 	"github.com/smacker/go-tree-sitter/rust"
 	"github.com/smacker/go-tree-sitter/scala"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
+	"golang.org/x/term"
 )
 
 var CLI struct {
 	Symbols struct {
 		Path string `arg:"" name:"path" help:"Path to search for symbols" type:"path"`
 	} `cmd:"" help:"Get symbols from a directory or file"`
+
+	Symbol struct {
+		Path    string `arg:"" name:"path" help:"Path to search for symbols" type:"path"`
+		Pattern string `arg:"" name:"pattern" help:"Pattern to search for"`
+	} `cmd:"" help:"Print a specific symbol from code files in a given path"`
 
 	Tree struct {
 		Path     string `arg:"" name:"file" help:"Path to search for symbols" type:"path"`
@@ -45,9 +52,10 @@ func testfunc(a int, b bool, c ...string) bool {
 }
 
 type ParsedDocument struct {
-	Root       *sitter.Node
-	SourceCode []byte
-	Language   *sitter.Language
+	Root         *sitter.Node
+	SourceCode   []byte
+	Language     *sitter.Language
+	LanguageName string
 }
 
 func RangeString(rng *sitter.Range) string {
@@ -190,6 +198,27 @@ func (this *ParsedDocument) QuerySymbols() ([]*Symbol, error) {
 	return symbols, nil
 }
 
+func (this *ParsedDocument) NodeToSymbolWithComments(node *sitter.Node) *Symbol {
+	var code strings.Builder
+	rng := GetRange(node)
+
+	doc, commentStart, commentStartBytes := precedingComments(node, this.SourceCode)
+	if doc != "" {
+		code.WriteString(doc)
+		code.WriteString("\n")
+		rng.StartPoint = *commentStart
+		rng.StartByte = commentStartBytes
+	}
+
+	code.WriteString(string(node.Content(this.SourceCode)))
+
+	return &Symbol{
+		Summary: code.String(),
+		Range:   rng,
+		Node:    node,
+	}
+}
+
 // Given a treesitter node, find any preceding comments and stringify all
 // of its children except for 'body', returning it as a Symbol.
 func (this *ParsedDocument) EverythingExceptBody(node *sitter.Node) *Symbol {
@@ -289,16 +318,60 @@ func (this *ParsedDocument) QueryVarDeclarations() ([]*Symbol, error) {
 	return symbols, nil
 }
 
-func NewParsedDocument(sourceCode []byte, language *sitter.Language) (*ParsedDocument, error) {
+func (this *ParsedDocument) SymbolName(node *sitter.Node) string {
+	fieldNames := []string{"name"}
+
+	for _, fieldName := range fieldNames {
+		childNode := node.ChildByFieldName(fieldName)
+		if childNode != nil {
+			return string(childNode.Content(this.SourceCode))
+		}
+	}
+
+	if this.LanguageName == "go" {
+		switch node.Type() {
+		case "var_declaration", "type_declaration":
+			code := string(node.Child(1).Content(this.SourceCode))
+			return strings.Split(code, " ")[0]
+		}
+	}
+
+	return ""
+}
+
+func (this *ParsedDocument) FindSymbolsMatching(pattern string) ([]*Symbol, error) {
+	cursor := sitter.NewTreeCursor(this.Root)
+	cursor.GoToFirstChild()
+	matches := []*Symbol{}
+
+	for {
+		currNode := cursor.CurrentNode()
+		name := this.SymbolName(currNode)
+
+		if name != "" && strings.Contains(name, pattern) {
+			match := this.NodeToSymbolWithComments(currNode)
+			matches = append(matches, match)
+		}
+
+		if !cursor.GoToNextSibling() {
+			break
+		}
+	}
+
+	return matches, nil
+}
+
+func NewParsedDocument(sourceCode []byte, language *sitter.Language, langName string) (*ParsedDocument, error) {
 	rootNode, err := sitter.ParseCtx(context.Background(), sourceCode, language)
 	if err != nil {
 		return nil, err
 	}
 
 	return &ParsedDocument{
-		Root:       rootNode,
-		SourceCode: sourceCode,
-		Language:   language,
+		Root:         rootNode,
+		SourceCode:   sourceCode,
+		Language:     language,
+		LanguageName: langName,
 	}, nil
 }
 
@@ -319,58 +392,45 @@ func sliceContains(slice []string, item string) bool {
 	return false
 }
 
-func GetLanguageFromExtension(ext string) *sitter.Language {
+func GetLanguageFromExtension(ext string) (*sitter.Language, string) {
 	if ext[0] == '.' {
 		ext = ext[1:]
 	}
 
 	switch ext {
 	case "go":
-		return golang.GetLanguage()
+		return golang.GetLanguage(), "go"
 	case "rs":
-		return rust.GetLanguage()
+		return rust.GetLanguage(), "rust"
 	case "js":
-		return javascript.GetLanguage()
+		return javascript.GetLanguage(), "javascript"
 	case "ts":
-		return typescript.GetLanguage()
+		return typescript.GetLanguage(), "typescript"
 	case "c", "h":
-		return c.GetLanguage()
+		return c.GetLanguage(), "c"
 	case "cpp", "cxx", "cc", "hpp", "hxx", "hh":
-		return cpp.GetLanguage()
+		return cpp.GetLanguage(), "cpp"
 	case "java":
-		return java.GetLanguage()
+		return java.GetLanguage(), "java"
 	case "php":
-		return php.GetLanguage()
+		return php.GetLanguage(), "php"
 	case "py":
-		return python.GetLanguage()
+		return python.GetLanguage(), "python"
 	case "rb":
-		return ruby.GetLanguage()
+		return ruby.GetLanguage(), "ruby"
 	case "cs":
-		return csharp.GetLanguage()
+		return csharp.GetLanguage(), "csharp"
 	case "scala":
-		return scala.GetLanguage()
+		return scala.GetLanguage(), "scala"
 	case "proto":
-		return protobuf.GetLanguage()
+		return protobuf.GetLanguage(), "protobuf"
 	default:
-		return nil
+		return nil, ""
 	}
 }
 
 func PrintFileSymbols(path string) error {
-	// Read the file
-	sourceCode, err := ioutil.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	// get extension
-	ext := filepath.Ext(path)
-	// Parse source code
-	lang := GetLanguageFromExtension(ext)
-	if lang == nil {
-		return fmt.Errorf("Unsupported file extension: %s", ext)
-	}
-
-	doc, err := NewParsedDocument(sourceCode, lang)
+	doc, err := ParseFile(path)
 	if err != nil {
 		return err
 	}
@@ -389,16 +449,55 @@ func PrintFileSymbols(path string) error {
 	return nil
 }
 
-// Given a path, recurse through all files, check if they are code files,
-// and if so, parse them and print out all symbols with PrintFileSymbols
-func PrintSymbols(path string) error {
+func ParseFile(path string) (*ParsedDocument, error) {
+	// Read the file
+	sourceCode, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	// get extension
+	ext := filepath.Ext(path)
+	// Parse source code
+	lang, langName := GetLanguageFromExtension(ext)
+	if lang == nil {
+		return nil, fmt.Errorf("Unsupported file extension: %s", ext)
+	}
+
+	return NewParsedDocument(sourceCode, lang, langName)
+}
+
+func PrintFileSymbolsMatching(path string, pattern string) error {
+	doc, err := ParseFile(path)
+	if err != nil {
+		return err
+	}
+
+	sym, err := doc.FindSymbolsMatching(pattern)
+	if err != nil {
+		return err
+	}
+
+	if len(sym) == 0 {
+		return nil
+	}
+
+	fmt.Printf("%s:\n", path)
+
+	for _, s := range sym {
+		fmt.Printf("%s\n%s\n\n", RangeString(s.Range), s.Summary)
+	}
+
+	return nil
+}
+
+func CodeFileWalker(path string, callback func(string) error) error {
 	fileInfo, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
 
 	if !fileInfo.IsDir() {
-		return PrintFileSymbols(path)
+		return callback(path)
 	}
 
 	err = filepath.Walk(path, func(subPath string, info os.FileInfo, err error) error {
@@ -419,17 +518,32 @@ func PrintSymbols(path string) error {
 		}
 
 		if !info.IsDir() && sliceContains(codeSuffixes, fileSuffix) {
-			return PrintFileSymbols(subPath)
+			return callback(subPath)
 		}
 
 		if info.IsDir() {
-			PrintSymbols(subPath)
+			CodeFileWalker(subPath, callback)
 		}
 
 		return nil
 	})
 
 	return err
+}
+
+// Given a path, recurse through all files, check if they are code files,
+// and if so, parse them and print out all symbols with PrintFileSymbols
+func PrintSymbols(path string) error {
+	return CodeFileWalker(path, func(subPath string) error {
+		return PrintFileSymbols(subPath)
+	})
+}
+
+// foo bar
+func PrintSymbolsMatching(path string, pattern string) error {
+	return CodeFileWalker(path, func(subPath string) error {
+		return PrintFileSymbolsMatching(subPath, pattern)
+	})
 }
 
 func isOnlyWhitespace(s string) bool {
@@ -441,23 +555,69 @@ func isOnlyWhitespace(s string) bool {
 	return true
 }
 
-func PrintParseTree(cursor *sitter.TreeCursor, depth int, depthRemaining int, childLines []int) {
+// constants for printing parse tree
+const (
+	LINE_NONE = iota
+	LINE_VERTICAL
+	LINE_CHILD
+	LINE_LAST_CHILD
+)
+
+var ttyWidth = -1
+
+const tree_padding = 15
+
+// get terminal width
+func getTermWidth() int {
+	if ttyWidth != -1 {
+		return ttyWidth
+	}
+
+	width, _, err := term.GetSize(0)
+	if err != nil {
+		return 80
+	}
+	ttyWidth = width
+	return width
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// replace chunks of whitespace with a single space
+func collapseWhitespace(s string) string {
+	re := regexp.MustCompile(`\s+`)
+	return re.ReplaceAllString(s, " ")
+}
+
+func (this *ParsedDocument) PrintParseTree(cursor *sitter.TreeCursor, depth int, depthRemaining int, childLines []int) {
 	if depthRemaining == 0 {
 		return
 	}
 
-	var padding string
+	var treeStructure string
 	if depth >= 1 {
 		for _, line := range childLines {
 			switch line {
-			case 0:
-				padding += "  "
-			case 1:
-				padding += "│ "
-			case 2:
-				padding += "├ "
-			case 3:
-				padding += "╰ "
+			case LINE_NONE:
+				treeStructure += "  "
+			case LINE_VERTICAL:
+				treeStructure += "│ "
+			case LINE_CHILD:
+				treeStructure += "├ "
+			case LINE_LAST_CHILD:
+				treeStructure += "╰ "
 			}
 		}
 	}
@@ -471,7 +631,18 @@ func PrintParseTree(cursor *sitter.TreeCursor, depth int, depthRemaining int, ch
 	}
 
 	if nodeString != "" {
-		fmt.Printf("%s%s\n", padding, nodeString)
+		nodeCode := string(node.Content(this.SourceCode))
+		// replace whitespace with space
+		nodeCode = collapseWhitespace(nodeCode)
+
+		str := fmt.Sprintf("%s%s", treeStructure, nodeString)
+		remaining := getTermWidth() - len(str) - tree_padding
+		// fill up the remaining space with the nodevalue string
+		if remaining > 0 {
+			str += strings.Repeat(" ", tree_padding)
+			str += nodeCode[:min(len(nodeCode), remaining)]
+		}
+		fmt.Println(str)
 	}
 
 	childCount := int(node.ChildCount())
@@ -482,20 +653,20 @@ func PrintParseTree(cursor *sitter.TreeCursor, depth int, depthRemaining int, ch
 		if len(newChildLines) > 1 {
 			lastLine := len(newChildLines) - 2
 			if newChildLines[lastLine] == 3 {
-				newChildLines[lastLine] = 0
+				newChildLines[lastLine] = LINE_NONE
 			} else if newChildLines[lastLine] == 2 {
-				newChildLines[lastLine] = 1
+				newChildLines[lastLine] = LINE_VERTICAL
 			}
 		}
 
 		for cursor.GoToNextSibling() {
 			if children == childCount-2 {
-				newChildLines[len(newChildLines)-1] = 3
+				newChildLines[len(newChildLines)-1] = LINE_LAST_CHILD
 			} else {
-				newChildLines[len(newChildLines)-1] = 2
+				newChildLines[len(newChildLines)-1] = LINE_CHILD
 			}
 
-			PrintParseTree(cursor, depth+1, depthRemaining-1, newChildLines)
+			this.PrintParseTree(cursor, depth+1, depthRemaining-1, newChildLines)
 			children++
 		}
 		cursor.GoToParent()
@@ -511,18 +682,18 @@ func PrintTree(path string, maxDepth int) error {
 	// get extension
 	ext := filepath.Ext(path)
 	// Parse source code
-	lang := GetLanguageFromExtension(ext)
+	lang, langName := GetLanguageFromExtension(ext)
 	if lang == nil {
 		return fmt.Errorf("Unsupported file extension: %s", ext)
 	}
 
-	doc, err := NewParsedDocument(sourceCode, lang)
+	doc, err := NewParsedDocument(sourceCode, lang, langName)
 	if err != nil {
 		return err
 	}
 
 	cursor := sitter.NewTreeCursor(doc.Root)
-	PrintParseTree(cursor, 0, maxDepth, []int{})
+	doc.PrintParseTree(cursor, 0, maxDepth, []int{})
 	return nil
 }
 
@@ -535,6 +706,9 @@ func main() {
 	switch ctx.Command() {
 	case "symbols <path>":
 		err = PrintSymbols(CLI.Symbols.Path)
+
+	case "symbol <path> <pattern>":
+		err = PrintSymbolsMatching(CLI.Symbol.Path, CLI.Symbol.Pattern)
 
 	case "tree <file>":
 		err = PrintTree(CLI.Tree.Path, CLI.Tree.MaxDepth)

@@ -18,7 +18,9 @@ watch: Makefile
 
 test: bin/tako
 	./bin/tako symbols .
-	./bin/tako tree main.go -d 3
+	./bin/tako tree main.go -d 4
+	./bin/tako symbol main.go PrintSymbolsMatching
+	./bin/tako symbol main.go ParsedDocument
 
 build: bin/tako
 
