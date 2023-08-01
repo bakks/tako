@@ -36,7 +36,7 @@ var CLI struct {
 
 	Symbol struct {
 		Path    string `arg:"" name:"path" help:"Path to search for symbols" type:"path"`
-		Pattern string `arg:"" name:"pattern" help:"Pattern to search for"`
+		Pattern string `arg:"" name:"pattern" help:"Pattern to search for, a regular expression (as parsed by golang regexp library)"`
 	} `cmd:"" help:"Print a specific symbol from code files in a given path"`
 
 	Tree struct {
@@ -339,7 +339,7 @@ func (this *ParsedDocument) SymbolName(node *sitter.Node) string {
 	return ""
 }
 
-func (this *ParsedDocument) FindSymbolsMatching(pattern string) ([]*Symbol, error) {
+func (this *ParsedDocument) FindSymbolsMatching(regex *regexp.Regexp) ([]*Symbol, error) {
 	cursor := sitter.NewTreeCursor(this.Root)
 	cursor.GoToFirstChild()
 	matches := []*Symbol{}
@@ -348,7 +348,7 @@ func (this *ParsedDocument) FindSymbolsMatching(pattern string) ([]*Symbol, erro
 		currNode := cursor.CurrentNode()
 		name := this.SymbolName(currNode)
 
-		if name != "" && strings.Contains(name, pattern) {
+		if name != "" && regex.MatchString(name) {
 			match := this.NodeToSymbolWithComments(currNode)
 			matches = append(matches, match)
 		}
@@ -466,13 +466,13 @@ func ParseFile(path string) (*ParsedDocument, error) {
 	return NewParsedDocument(sourceCode, lang, langName)
 }
 
-func PrintFileSymbolsMatching(path string, pattern string) error {
+func PrintFileSymbolsMatching(path string, regex *regexp.Regexp) error {
 	doc, err := ParseFile(path)
 	if err != nil {
 		return err
 	}
 
-	sym, err := doc.FindSymbolsMatching(pattern)
+	sym, err := doc.FindSymbolsMatching(regex)
 	if err != nil {
 		return err
 	}
@@ -541,8 +541,13 @@ func PrintSymbols(path string) error {
 
 // foo bar
 func PrintSymbolsMatching(path string, pattern string) error {
+	regex, err := regexp.Compile(pattern)
+	if err != nil {
+		return fmt.Errorf("Search pattern could not be parsed as a regular expression: %s", err)
+	}
+
 	return CodeFileWalker(path, func(subPath string) error {
-		return PrintFileSymbolsMatching(subPath, pattern)
+		return PrintFileSymbolsMatching(subPath, regex)
 	})
 }
 

@@ -20,7 +20,7 @@ test: bin/tako
 	./bin/tako symbols .
 	./bin/tako tree main.go -d 4
 	./bin/tako symbol main.go PrintSymbolsMatching
-	./bin/tako symbol main.go ParsedDocument
+	./bin/tako symbol main.go '^ParsedDocument$$'
 
 build: bin/tako
 
