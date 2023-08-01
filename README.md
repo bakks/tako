@@ -4,7 +4,7 @@ Tako is a command line tool to parse specific objects within code files, for
 example to print a list of functions or find a symbol matching a search pattern.
 I developed it because I was tired of copying/pasting code from an editor
 into a large language model, and it's helpful to reduce the code to the important
-pieces (e.g. function declarations) rather than wasting the content window on
+pieces (e.g. function declarations) rather than wasting the context window on
 everything else (like the function body).
 
 The tool is written in Golang and uses [Tree-Sitter](https://tree-sitter.github.io)
